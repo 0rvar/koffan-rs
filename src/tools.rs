@@ -333,8 +333,9 @@ fn per_item_reply(header: String, lines: Vec<std::result::Result<String, String>
     }
 }
 
-/// Renders a list for reading aloud: a header with open/total counts, the
-/// open items grouped under their section names, and one line naming the
+/// Renders a list for reading aloud: a header with open/total counts, one
+/// line naming every section (empty ones included) in list order, the open
+/// items grouped under their section names, and one line naming the
 /// checked-off items.
 pub fn render_list(list: &List, sections: &[Section]) -> String {
     let all = sections.iter().flat_map(|s| s.items.iter());
@@ -344,6 +345,11 @@ pub fn render_list(list: &List, sections: &[Section]) -> String {
         .map(|i| i.name.as_str())
         .collect();
     let mut out = format!("{}: {} open of {total}", list.name, total - checked.len());
+    if !sections.is_empty() {
+        let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+        out.push_str("\nSections: ");
+        out.push_str(&names.join(", "));
+    }
 
     for section in sections {
         let mut open = section.items.iter().filter(|i| !i.completed).peekable();
@@ -417,7 +423,7 @@ impl Tools {
             },
             ToolSpec {
                 name: SHOW,
-                description: "Show a shopping list as text: open items grouped by section with \
+                description: "Show a shopping list as text: all section names, open items grouped by section with \
                     quantity and note, then one line naming the checked-off items. Omit `list` for \
                     the household's default list; list names are matched case-insensitively and by prefix.",
                 input_schema: json!({
@@ -428,10 +434,11 @@ impl Tools {
             },
             ToolSpec {
                 name: ADD,
-                description: "Add items to a shopping list. A name already anywhere on the list is \
-                    not duplicated: an open item is kept (quantity updated if given), a checked-off \
-                    one is put back. `section` is matched case-insensitively and by prefix, created \
-                    if nothing matches, and defaults to the first section. Omit `list` for the default list.",
+                description: "Add items to a shopping list. A name already on the list is not \
+                    duplicated: an open item is kept, a checked-off one is put back. `section` is \
+                    matched case-insensitively and by prefix, created if nothing matches, and \
+                    defaults to the list's first section; shopping_list_show lists the existing \
+                    section names. Omit `list` for the default list.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {

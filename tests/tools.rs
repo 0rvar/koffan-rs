@@ -110,6 +110,7 @@ async fn show_renders_open_items_by_section_then_checked_off_line() {
     assert_eq!(
         reply.content,
         "Mat: 5 open of 7\n\
+         Sections: Frukt & grönt, Mejeri, Bröd, Skafferi\n\
          \n\
          Frukt & grönt\n\
          - Äpplen ×6 (röda)\n\
@@ -727,4 +728,13 @@ async fn add_updates_the_description_of_an_open_item() {
         reply.content,
         "Mat:\n- Äpplen: already on the list (in Frukt & grönt), description set to \"gröna\", quantity set to 4"
     );
+}
+
+#[tokio::test]
+async fn show_omits_the_sections_line_when_the_list_has_no_sections() {
+    let server = server_with(Value::Null).await;
+    let reply = tools(&server, None)
+        .call("shopping_list_show", &json!({}))
+        .await;
+    assert_eq!(reply.content, "Mat: 0 open of 0");
 }
