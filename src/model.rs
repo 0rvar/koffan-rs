@@ -111,8 +111,8 @@ pub struct CreateItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity: Option<i64>,
 }
-
-/// What `POST /items` did. Koffan matches the name case-insensitively against
+/// What `POST /items` did. Koffan compares the name, ignoring ASCII case only,
+/// against items in the target section before creating a new row.
 /// items in the same section before creating a new row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateItemOutcome {

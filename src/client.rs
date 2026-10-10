@@ -1,6 +1,7 @@
+use std::fmt;
 use std::time::Duration;
 
-use reqwest::{Method, RequestBuilder, Response};
+use reqwest::{Method, RequestBuilder, Response, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -8,18 +9,31 @@ use serde_json::json;
 use crate::error::{Error, Result};
 use crate::model::*;
 
-const TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Longest non-Koffan error body kept in [`Error::Api::message`].
+const MAX_ERROR_TEXT: usize = 200;
 
 /// Async client for Koffan's `/api/v1` REST API.
 ///
 /// The token is the server's `API_TOKEN`. It gives access to exactly one
 /// workspace; ids from any other workspace answer 404 like missing ones.
-/// Cloning is cheap and shares the connection pool.
-#[derive(Debug, Clone)]
+/// Cloning is cheap and shares the connection pool. `Debug` output omits the token.
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    base: String,
+    /// The server URL with `/api/v1` appended; endpoint paths are added as segments.
+    base: Url,
     token: String,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("base", &self.base.as_str())
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -73,27 +87,43 @@ struct NewList<'a> {
 
 impl Client {
     /// Creates a client for the Koffan server at `base_url` (for example
-    /// `https://koffan.example.com`); `/api/v1` is appended.
+    /// `https://koffan.example.com`, or `https://example.com/koffan` behind a
+    /// path prefix); `/api/v1` is appended. The URL must be http(s) and must
+    /// not carry a query or fragment.
     pub fn new(base_url: impl AsRef<str>, token: impl Into<String>) -> Result<Client> {
         let raw = base_url.as_ref().trim();
-        let parsed =
-            reqwest::Url::parse(raw).map_err(|e| Error::InvalidUrl(format!("{raw}: {e}")))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(Error::InvalidUrl(format!(
-                "{raw}: scheme must be http or https"
-            )));
+        let invalid = |why: &str| Error::InvalidUrl(format!("{raw}: {why}"));
+        let mut base = Url::parse(raw).map_err(|e| invalid(&e.to_string()))?;
+        if !matches!(base.scheme(), "http" | "https") {
+            return Err(invalid("scheme must be http or https"));
         }
+        if base.query().is_some() || base.fragment().is_some() {
+            return Err(invalid("must not contain a query or fragment"));
+        }
+        base.path_segments_mut()
+            .map_err(|()| invalid("cannot be used as a base URL"))?
+            .pop_if_empty()
+            .extend(["api", "v1"]);
         let http = reqwest::Client::builder().timeout(TIMEOUT).build()?;
         Ok(Client {
             http,
-            base: format!("{}/api/v1", raw.trim_end_matches('/')),
+            base,
             token: token.into(),
         })
     }
 
+    /// The URL for an endpoint path such as `/lists/3/sections`.
+    fn endpoint(&self, path: &str) -> Url {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .expect("the base URL was checked in Client::new")
+            .extend(path.split('/').filter(|s| !s.is_empty()));
+        url
+    }
+
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         self.http
-            .request(method, format!("{}{}", self.base, path))
+            .request(method, self.endpoint(path))
             .bearer_auth(&self.token)
     }
 
@@ -113,21 +143,26 @@ impl Client {
                 code: body.error,
                 message: body.message,
             },
-            Err(_) => Error::Api {
-                status: status.as_u16(),
-                code: reason.clone(),
-                message: if text.trim().is_empty() {
-                    reason
-                } else {
-                    text.trim().to_string()
-                },
-            },
+            Err(_) => {
+                let text = text.trim();
+                Error::Api {
+                    status: status.as_u16(),
+                    code: reason.clone(),
+                    message: if text.is_empty() {
+                        reason
+                    } else {
+                        text.chars().take(MAX_ERROR_TEXT).collect()
+                    },
+                }
+            }
         })
     }
 
     async fn send<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
         let resp = Self::check(req.send().await?).await?;
-        Ok(resp.json::<T>().await?)
+        let url = resp.url().to_string();
+        let body = resp.bytes().await?;
+        serde_json::from_slice(&body).map_err(|source| Error::UnexpectedResponse { url, source })
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -170,7 +205,7 @@ impl Client {
         self.get(&format!("/lists/{id}")).await
     }
 
-    /// Creates a list. Names are unique case-insensitively; a duplicate fails
+    /// Creates a list. Names are unique ignoring ASCII case; a duplicate fails
     /// with `Error::Api { status: 400, code: "list_name_exists", .. }`. `icon` is
     /// an emoji or an alias such as `cart` or `home`; anything else becomes 🛒.
     pub async fn create_list(&self, name: &str, icon: Option<&str>) -> Result<List> {
@@ -266,11 +301,14 @@ impl Client {
         self.get(&format!("/items/{id}")).await
     }
 
-    /// Adds an item to a section, merging with a same-named item (compared
-    /// case-insensitively) in that section: an open one is left unchanged, a
-    /// completed one is un-completed. [`CreateItemOutcome::status`] says which.
-    /// Only the target section is checked, so a same-named item in another
-    /// section does not prevent a new row.
+    /// Adds an item to a section, merging with a same-named item in that
+    /// section: an open one is left unchanged, a completed one is
+    /// un-completed. [`CreateItemOutcome::status`] says which.
+    ///
+    /// The server's name comparison covers only the target section and folds
+    /// case for ASCII letters only, so "Ägg" and "ägg", or the same name in
+    /// another section, become separate rows. Check the list first (as
+    /// [`crate::tools::Tools`] does) when duplicates matter.
     pub async fn create_item(&self, item: &CreateItem) -> Result<CreateItemOutcome> {
         self.post_json("/items", item).await
     }
@@ -279,10 +317,18 @@ impl Client {
     ///
     /// Koffan clears the description when an update carries neither a name
     /// nor a description, so [`ItemUpdate`] always carries the name; pass the
-    /// current name to keep it. The completed and uncertain flags cannot be
-    /// set here: use [`Client::set_item_completed`], [`Client::toggle_item`] or
+    /// current name to keep it. A blank name is refused with
+    /// [`Error::InvalidInput`] without contacting the server. The completed
+    /// and uncertain flags cannot be set here: use
+    /// [`Client::set_item_completed`], [`Client::toggle_item`] or
     /// [`Client::toggle_uncertain`].
     pub async fn update_item(&self, id: i64, update: &ItemUpdate) -> Result<Item> {
+        if update.name.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "update_item needs the item's name; without it Koffan clears the description"
+                    .into(),
+            ));
+        }
         self.put_json(&format!("/items/{id}"), update).await
     }
 
@@ -355,8 +401,8 @@ impl Client {
         Ok(self.get::<HistoryBody>("/history").await?.items)
     }
 
-    /// Records a use of `name` in the suggestion history (case-insensitive
-    /// upsert) and returns the stored name.
+    /// Records a use of `name` in the suggestion history (upsert ignoring
+    /// ASCII case) and returns the stored name.
     pub async fn add_history(&self, name: &str, section_id: Option<i64>) -> Result<String> {
         let body = match section_id {
             Some(section_id) => json!({ "name": name, "section_id": section_id }),

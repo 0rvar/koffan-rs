@@ -11,49 +11,72 @@ pub fn normalize(s: &str) -> String {
         .to_lowercase()
 }
 
+/// How a name matched a query, from strongest to weakest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    Exact,
+    Prefix,
+    Contains,
+}
+
+/// Returns the strongest tier any candidate reaches and every candidate in
+/// it, in input order: all exact matches of the normalized query, else all
+/// candidates starting with it, else all containing it. `None` when nothing
+/// matches or the query is blank.
+pub fn best_tier<'a, T: ?Sized>(
+    query: &str,
+    candidates: impl Iterator<Item = (&'a T, &'a str)>,
+) -> Option<(Tier, Vec<(&'a T, &'a str)>)> {
+    let q = normalize(query);
+    if q.is_empty() {
+        return None;
+    }
+    let mut best: Option<(Tier, Vec<(&'a T, &'a str)>)> = None;
+    for (value, name) in candidates {
+        let n = normalize(name);
+        let tier = if n == q {
+            Tier::Exact
+        } else if n.starts_with(&q) {
+            Tier::Prefix
+        } else if n.contains(&q) {
+            Tier::Contains
+        } else {
+            continue;
+        };
+        match &mut best {
+            Some((t, hits)) if *t == tier => hits.push((value, name)),
+            Some((t, _)) if *t < tier => {}
+            _ => best = Some((tier, vec![(value, name)])),
+        }
+    }
+    best
+}
+
 /// Picks the candidate whose name matches `query`, comparing normalized names.
 ///
-/// An exact match wins (the first one if several are equal). Otherwise a
+/// An exact match wins, the first one if several are equal. Otherwise a
 /// single candidate starting with the query wins, and failing that a single
 /// candidate containing it. Several prefix or substring hits give
-/// [`Error::Ambiguous`] listing their names; no hit, or an empty query, gives
+/// [`Error::Ambiguous`] listing their names; no hit, or a blank query, gives
 /// [`Error::NotFound`]. `what` names the kind of thing in the error, e.g. `"list"`.
 pub fn resolve<'a, T>(
     what: &'static str,
     query: &str,
     candidates: impl Iterator<Item = (&'a T, &'a str)>,
 ) -> Result<&'a T> {
-    let q = normalize(query);
-    let not_found = || Error::NotFound {
-        what,
-        name: query.trim().to_string(),
-    };
-    if q.is_empty() {
-        return Err(not_found());
+    match best_tier(query, candidates) {
+        None => Err(Error::NotFound {
+            what,
+            name: query.trim().to_string(),
+        }),
+        Some((Tier::Exact, hits)) => Ok(hits[0].0),
+        Some((_, hits)) if hits.len() == 1 => Ok(hits[0].0),
+        Some((_, hits)) => Err(Error::Ambiguous {
+            what,
+            name: query.trim().to_string(),
+            candidates: hits.iter().map(|(_, name)| name.to_string()).collect(),
+        }),
     }
-    let candidates: Vec<(&'a T, &'a str, String)> = candidates
-        .map(|(value, name)| (value, name, normalize(name)))
-        .collect();
-
-    if let Some((value, _, _)) = candidates.iter().find(|(_, _, n)| *n == q) {
-        return Ok(value);
-    }
-    let tiers: [&dyn Fn(&str) -> bool; 2] = [&|n| n.starts_with(&q), &|n| n.contains(&q)];
-    for matches in tiers {
-        let hits: Vec<_> = candidates.iter().filter(|(_, _, n)| matches(n)).collect();
-        match hits.as_slice() {
-            [] => continue,
-            [(value, _, _)] => return Ok(value),
-            many => {
-                return Err(Error::Ambiguous {
-                    what,
-                    name: query.trim().to_string(),
-                    candidates: many.iter().map(|(_, name, _)| name.to_string()).collect(),
-                })
-            }
-        }
-    }
-    Err(not_found())
 }
 
 #[cfg(test)]
@@ -142,5 +165,19 @@ mod tests {
             pick("  ", &["Mjölk"]).unwrap_err(),
             Error::NotFound { .. }
         ));
+    }
+
+    #[test]
+    fn best_tier_returns_every_hit_of_the_strongest_tier() {
+        let names = ["Smörgåsgurka", "Smör", "smör", "Jordnötssmör"];
+        let (tier, hits) = best_tier("SMÖR", names.iter().map(|n| (n, *n))).unwrap();
+        assert_eq!(tier, Tier::Exact);
+        assert_eq!(
+            hits.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+            vec!["Smör", "smör"]
+        );
+        let (tier, hits) = best_tier("smörg", names.iter().map(|n| (n, *n))).unwrap();
+        assert_eq!((tier, hits.len()), (Tier::Prefix, 1));
+        assert!(best_tier(" ", names.iter().map(|n| (n, *n))).is_none());
     }
 }

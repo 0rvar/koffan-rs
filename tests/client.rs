@@ -193,3 +193,78 @@ fn rejects_non_http_base_url() {
         Error::InvalidUrl(_)
     ));
 }
+
+#[tokio::test]
+async fn update_item_refuses_blank_name_without_a_request() {
+    let (server, client) = setup().await;
+    let err = client
+        .update_item(
+            7,
+            &ItemUpdate {
+                name: "  ".into(),
+                description: None,
+                quantity: Some(3),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn debug_output_redacts_the_token() {
+    let client = Client::new("https://koffan.example.com", "hunter2-secret").unwrap();
+    let debug = format!("{client:?}");
+    assert!(!debug.contains("hunter2"), "{debug}");
+    assert!(debug.contains("koffan.example.com/api/v1"), "{debug}");
+}
+
+#[test]
+fn rejects_base_url_with_query_or_fragment() {
+    for url in ["https://example.com/?x=1", "https://example.com/#top"] {
+        assert!(
+            matches!(Client::new(url, "t").unwrap_err(), Error::InvalidUrl(_)),
+            "{url}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn base_url_path_prefix_is_kept() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/koffan/api/v1/lists"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "lists": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::new(format!("{}/koffan/", server.uri()), "secret").unwrap();
+    assert!(client.lists().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn non_json_success_body_suggests_a_wrong_url() {
+    let (server, client) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/lists"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>login</html>"))
+        .mount(&server)
+        .await;
+    let err = client.lists().await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "unexpected response from {}/api/v1/lists; is this a Koffan API URL?",
+            server.uri()
+        )
+    );
+}
+
+#[tokio::test]
+async fn connection_failure_names_the_host() {
+    // Port 9 (discard) is closed on test machines, so the connection is refused.
+    let client = Client::new("http://127.0.0.1:9", "t").unwrap();
+    let err = client.lists().await.unwrap_err();
+    assert_eq!(err.to_string(), "could not connect to 127.0.0.1");
+}
