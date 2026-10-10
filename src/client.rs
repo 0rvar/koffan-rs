@@ -100,10 +100,11 @@ impl Client {
         if base.query().is_some() || base.fragment().is_some() {
             return Err(invalid("must not contain a query or fragment"));
         }
-        base.path_segments_mut()
-            .map_err(|()| invalid("cannot be used as a base URL"))?
-            .pop_if_empty()
-            .extend(["api", "v1"]);
+        if base.cannot_be_a_base() {
+            return Err(invalid("cannot be used as a base URL"));
+        }
+        let prefix = base.path().trim_end_matches('/').to_string();
+        base.set_path(&format!("{prefix}/api/v1"));
         let http = reqwest::Client::builder().timeout(TIMEOUT).build()?;
         Ok(Client {
             http,
@@ -349,10 +350,11 @@ impl Client {
 
     /// Sets the item's completed flag to `completed`.
     ///
-    /// The API has no "set completed" call, so this is two requests: it reads
-    /// the item and toggles it only when the state differs. It is not atomic;
-    /// a concurrent toggle between the two requests can leave the item in the
-    /// opposite state.
+    /// The API has no "set completed" or conditional toggle call, so this is
+    /// two requests: it reads the item and toggles it only when the state
+    /// differs. It is not atomic; a concurrent change between the read and the
+    /// toggle can be lost, leaving the item in the opposite state. The
+    /// returned item shows the state the server ended up with.
     pub async fn set_item_completed(&self, id: i64, completed: bool) -> Result<Item> {
         let item = self.item(id).await?;
         if item.completed == completed {

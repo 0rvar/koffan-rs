@@ -257,7 +257,7 @@ async fn add_reuses_same_named_item_anywhere_on_the_list() {
         reply.content,
         "Mat:\n\
          - Ägg: already on the list (in Skafferi), quantity set to 12\n\
-         - Smör: re-added (was checked off)\n\
+         - Smör: re-added (was checked off), description set to \"osaltat\"\n\
          - Banan: re-added (was checked off)\n\
          - Mjölk: already on the list (in Mejeri)"
     );
@@ -620,4 +620,111 @@ fn specs_cover_every_handled_tool() {
         );
     }
     assert!(!Tools::handles("send_email"));
+}
+
+#[tokio::test]
+async fn add_prefers_the_same_named_item_in_the_requested_section() {
+    let server = server_with(json!([
+        section(20, "Mejeri", json!([item(3, 20, "Mjölk", false, 0, "")])),
+        section(50, "Kyl", json!([item(8, 50, "mjölk", true, 0, "")])),
+    ]))
+    .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/items/8",
+        200,
+        item(8, 50, "mjölk", true, 0, ""),
+        1,
+    )
+    .await;
+    mock(
+        &server,
+        "POST",
+        "/api/v1/items/8/toggle",
+        200,
+        item(8, 50, "mjölk", false, 0, ""),
+        1,
+    )
+    .await;
+    mock(&server, "POST", "/api/v1/items", 201, json!({}), 0).await;
+    let reply = tools(&server, None)
+        .call(
+            "shopping_list_add",
+            &json!({ "items": [{ "name": "Mjölk", "section": "kyl" }] }),
+        )
+        .await;
+    assert!(!reply.is_error, "{}", reply.content);
+    assert_eq!(reply.content, "Mat:\n- mjölk: re-added (was checked off)");
+}
+
+#[tokio::test]
+async fn add_applies_quantity_when_the_server_finds_the_item_already_active() {
+    let server = server_with_mat().await;
+    // Kiwi was added by someone else after the list was read.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/items"))
+        .and(body_json(
+            json!({ "section_id": 10, "name": "Kiwi", "quantity": 3 }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "item": item(9, 10, "Kiwi", false, 1, ""), "already_active": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/items/9/quantity"))
+        .and(body_json(json!({ "quantity": 3 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(item(9, 10, "Kiwi", false, 3, "")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let reply = tools(&server, None)
+        .call(
+            "shopping_list_add",
+            &json!({ "items": [{ "name": "Kiwi", "quantity": 3 }] }),
+        )
+        .await;
+    assert!(!reply.is_error, "{}", reply.content);
+    assert_eq!(
+        reply.content,
+        "Mat:\n- Kiwi: already on the list (in Frukt & grönt), quantity set to 3"
+    );
+}
+
+#[tokio::test]
+async fn add_updates_the_description_of_an_open_item() {
+    let server = server_with_mat().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/items/1"))
+        .and(body_json(
+            json!({ "name": "Äpplen", "description": "gröna", "quantity": 4 }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(item(1, 10, "Äpplen", false, 4, "gröna")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    mock(
+        &server,
+        "POST",
+        "/api/v1/items/1/quantity",
+        200,
+        json!({}),
+        0,
+    )
+    .await;
+    let reply = tools(&server, None)
+        .call(
+            "shopping_list_add",
+            &json!({ "items": [{ "name": "äpplen", "description": "gröna", "quantity": 4 }] }),
+        )
+        .await;
+    assert!(!reply.is_error, "{}", reply.content);
+    assert_eq!(
+        reply.content,
+        "Mat:\n- Äpplen: already on the list (in Frukt & grönt), description set to \"gröna\", quantity set to 4"
+    );
 }

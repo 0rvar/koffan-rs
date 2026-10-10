@@ -268,3 +268,16 @@ async fn connection_failure_names_the_host() {
     let err = client.lists().await.unwrap_err();
     assert_eq!(err.to_string(), "could not connect to 127.0.0.1");
 }
+
+#[tokio::test]
+async fn base_url_with_several_trailing_slashes_keeps_its_prefix() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/koffan/api/v1/lists"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "lists": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::new(format!("{}/koffan//", server.uri()), "secret").unwrap();
+    assert!(client.lists().await.unwrap().is_empty());
+}

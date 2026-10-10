@@ -648,12 +648,42 @@ impl Tools {
             .filter(|d| !d.is_empty())
             .map(String::from);
 
+        // A same-named item in the requested section wins; otherwise any
+        // same-named item on the list is reused. An open one beats a
+        // checked-off one in either case.
         let key = normalize(name);
-        let existing = contents
+        let wanted_section = wanted
+            .section
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|q| {
+                resolve(
+                    "section",
+                    q,
+                    contents.sections.iter().map(|s| (s, s.name.as_str())),
+                )
+                .ok()
+                .map(|s| s.id)
+            });
+        let same_name: Vec<(usize, &Entry)> = contents
             .entries
             .iter()
             .enumerate()
             .filter(|(_, e)| normalize(&e.item.name) == key)
+            .collect();
+        let in_section: Vec<(usize, &Entry)> = same_name
+            .iter()
+            .copied()
+            .filter(|(_, e)| Some(e.item.section_id) == wanted_section)
+            .collect();
+        let pool = if in_section.is_empty() {
+            same_name
+        } else {
+            in_section
+        };
+        let existing = pool
+            .into_iter()
             .min_by_key(|(_, e)| e.item.completed)
             .map(|(i, _)| i);
         if let Some(i) = existing {
@@ -669,7 +699,7 @@ impl Tools {
             .create_item(&CreateItem {
                 section_id,
                 name: name.to_string(),
-                description,
+                description: description.clone(),
                 quantity,
             })
             .await
@@ -679,16 +709,66 @@ impl Tools {
             item: outcome.item,
             section: section_name.clone(),
         });
+        let entry = contents.entries.last_mut().expect("just pushed");
         Ok(match outcome.status {
             CreateStatus::Created if created => {
                 format!("{item_name}: added to {section_name} (new section)")
             }
             CreateStatus::Created => format!("{item_name}: added to {section_name}"),
+            // Someone added the item after our snapshot, or it was checked off
+            // in this section; the server may have kept its old quantity or
+            // description, so apply the requested ones.
             CreateStatus::AlreadyActive => {
-                format!("{item_name}: already on the list (in {section_name})")
+                let changes = self.apply_details(entry, quantity, description).await?;
+                format!("{item_name}: already on the list (in {section_name}){changes}")
             }
-            CreateStatus::Reactivated => format!("{item_name}: re-added (was checked off)"),
+            CreateStatus::Reactivated => {
+                let changes = self.apply_details(entry, quantity, description).await?;
+                format!("{item_name}: re-added (was checked off){changes}")
+            }
         })
+    }
+
+    /// Sets an item's quantity and description to the requested values where
+    /// given and different, and returns a reply suffix naming what changed
+    /// (empty when nothing did).
+    async fn apply_details(
+        &self,
+        entry: &mut Entry,
+        quantity: Option<i64>,
+        description: Option<String>,
+    ) -> std::result::Result<String, String> {
+        let quantity = quantity.filter(|q| *q != entry.item.quantity);
+        let description = description.filter(|d| *d != entry.item.description);
+        let mut changes = String::new();
+        if let Some(d) = &description {
+            entry.item = self
+                .client
+                .update_item(
+                    entry.item.id,
+                    &ItemUpdate {
+                        name: entry.item.name.clone(),
+                        description: Some(d.clone()),
+                        quantity,
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            changes.push_str(&format!(
+                ", description set to \"{}\"",
+                entry.item.description
+            ));
+        } else if let Some(q) = quantity {
+            entry.item = self
+                .client
+                .set_quantity(entry.item.id, q)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if quantity.is_some() {
+            changes.push_str(&format!(", quantity set to {}", entry.item.quantity));
+        }
+        Ok(changes)
     }
 
     /// Brings an item that is already on the list in line with an add request:
@@ -699,44 +779,25 @@ impl Tools {
         quantity: Option<i64>,
         description: Option<String>,
     ) -> std::result::Result<String, String> {
-        let id = entry.item.id;
         let name = entry.item.name.clone();
         if !entry.item.completed {
-            let mut line = format!("{name}: already on the list (in {})", entry.section);
-            if let Some(q) = quantity.filter(|q| *q != entry.item.quantity) {
-                entry.item = self
-                    .client
-                    .set_quantity(id, q)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                line.push_str(&format!(", quantity set to {}", entry.item.quantity));
-            }
-            return Ok(line);
+            let changes = self.apply_details(entry, quantity, description).await?;
+            return Ok(format!(
+                "{name}: already on the list (in {}){changes}",
+                entry.section
+            ));
         }
 
         entry.item = self
             .client
-            .set_item_completed(id, false)
+            .set_item_completed(entry.item.id, false)
             .await
             .map_err(|e| e.to_string())?;
         if entry.item.completed {
             return Err("still checked off (changed by someone else meanwhile)".into());
         }
-        if quantity.is_some() || description.is_some() {
-            entry.item = self
-                .client
-                .update_item(
-                    id,
-                    &ItemUpdate {
-                        name: entry.item.name.clone(),
-                        description,
-                        quantity,
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(format!("{name}: re-added (was checked off)"))
+        let changes = self.apply_details(entry, quantity, description).await?;
+        Ok(format!("{name}: re-added (was checked off){changes}"))
     }
 
     /// Picks the section a new item goes into: the named section, created if
@@ -869,7 +930,9 @@ impl Tools {
         let mut failed = Vec::new();
         for item in &checked {
             // The list may have changed since it was read; only delete items
-            // that are still checked off right now.
+            // that are still checked off right now. The API has no
+            // conditional delete, so an item reopened between this read and
+            // the delete is still deleted.
             match self.client.item(item.id).await {
                 Ok(current) if !current.completed => {
                     skipped.push(format!("{}: put back on the list meanwhile", item.name));
