@@ -85,17 +85,26 @@ mod tests {
 
     #[test]
     fn unique_prefix_matches() {
-        assert_eq!(pick("frukt", &["Bröd", "Frukt & grönt"]).unwrap(), &"Frukt & grönt");
+        assert_eq!(
+            pick("frukt", &["Bröd", "Frukt & grönt"]).unwrap(),
+            &"Frukt & grönt"
+        );
     }
 
     #[test]
     fn unique_substring_matches_when_no_prefix_does() {
-        assert_eq!(pick("grönt", &["Bröd", "Frukt & grönt"]).unwrap(), &"Frukt & grönt");
+        assert_eq!(
+            pick("grönt", &["Bröd", "Frukt & grönt"]).unwrap(),
+            &"Frukt & grönt"
+        );
     }
 
     #[test]
     fn prefix_tier_wins_over_substring_tier() {
-        assert_eq!(pick("ost", &["Ostbågar", "Kvarg och ost"]).unwrap(), &"Ostbågar");
+        assert_eq!(
+            pick("ost", &["Ostbågar", "Kvarg och ost"]).unwrap(),
+            &"Ostbågar"
+        );
     }
 
     #[test]
@@ -129,6 +138,9 @@ mod tests {
 
     #[test]
     fn empty_query_is_not_found() {
-        assert!(matches!(pick("  ", &["Mjölk"]).unwrap_err(), Error::NotFound { .. }));
+        assert!(matches!(
+            pick("  ", &["Mjölk"]).unwrap_err(),
+            Error::NotFound { .. }
+        ));
     }
 }

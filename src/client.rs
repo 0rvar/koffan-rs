@@ -234,7 +234,8 @@ impl Client {
 
     /// Marks every item in the section completed.
     pub async fn check_all(&self, section_id: i64) -> Result<CheckAllOutcome> {
-        self.post(&format!("/sections/{section_id}/check-all")).await
+        self.post(&format!("/sections/{section_id}/check-all"))
+            .await
     }
 
     /// Marks every item in the section open.

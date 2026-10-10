@@ -60,7 +60,9 @@ async fn create_item_parses_all_three_response_shapes() {
         Mock::given(method("POST"))
             .and(path("/api/v1/items"))
             .and(header("content-type", "application/json"))
-            .and(body_json(json!({ "section_id": 1, "name": "mjölk", "quantity": 2 })))
+            .and(body_json(
+                json!({ "section_id": 1, "name": "mjölk", "quantity": 2 }),
+            ))
             .respond_with(ResponseTemplate::new(status).set_body_json(body))
             .expect(1)
             .mount(&server)
