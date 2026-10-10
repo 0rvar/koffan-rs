@@ -26,11 +26,11 @@ println!("{:?}", outcome.status); // Created, Reactivated or AlreadyActive
 client.set_item_completed(outcome.item.id, true).await?;
 ```
 
-A few API quirks the client documents on the relevant methods: adding an item whose name already exists in the section merges with it instead of creating a duplicate, `toggle_item` flips rather than sets (use `set_item_completed`), and `update_item` always sends the name because the server clears the description otherwise.
+A few API quirks the client documents on the relevant methods. Adding an item merges it with a same-named item only within the target section, and the server ignores ASCII case only, so "Ägg" and "ägg" end up as two items. `toggle_item` flips rather than sets (use `set_item_completed`). `update_item` always sends the name because the server clears the description otherwise.
 
 ## Tools for LLM agents
 
-`Tools` exposes six tools: `shopping_lists`, `shopping_list_show`, `shopping_list_add`, `shopping_list_check`, `shopping_list_remove` and `shopping_list_clear_checked`. Lists, sections and items are matched by name (exact, then prefix, then substring, case-insensitive), so the model never sees ids. Replies are plain text meant to be read aloud. A call never returns `Err`: failures are replies with `is_error: true` that say what was ambiguous or which lists exist.
+`Tools` exposes six tools: `shopping_lists`, `shopping_list_show`, `shopping_list_add`, `shopping_list_check`, `shopping_list_remove` and `shopping_list_clear_checked`. Lists, sections and items are matched by name (exact, then prefix, then substring, ignoring case including å, ä and ö), so the model never sees ids. When the same name is in several sections, the model can pass `{ "name", "section" }`. Adding checks the whole list first, so an item already on it is reused or put back instead of duplicated. Replies are plain text meant to be read aloud. A call never returns `Err`: failures are replies with `is_error: true` that say what was ambiguous or which lists exist, and a call where only some items failed still lists every item.
 
 ```rust
 use koffan::tools::Tools;
@@ -42,7 +42,7 @@ for spec in Tools::specs() {
 }
 let reply = tools.call("shopping_list_add", &json!({ "items": [{ "name": "mjölk", "quantity": 2, "section": "mej" }] })).await;
 assert!(!reply.is_error);
-println!("{}", reply.content); // "Mat:\n- Mjölk: added to Mejeri"
+println!("{}", reply.content); // "Mat:\n- Mjölk: added to Mejeri", or "already on the list (in Kyl)"
 ```
 
 ### Wrapping in a tool trait
